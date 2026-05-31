@@ -1,0 +1,781 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+\newtheorem{lemma}{Lemma}
+\theoremstyle{definition}
+\newtheorem{assumption}{Assumption}
+\newtheorem{remark}{Remark}
+
+\newcommand{\Keff}{K_{\mathrm{eff}}}
+\newcommand{\dPPL}{\Delta\mathrm{PPL}}
+\newcommand{\uQ}{u_Q}
+\newcommand{\softmax}{\mathrm{softmax}}
+\newcommand{\Attn}{\mathrm{Attn}}
+\newcommand{\TV}{\mathrm{TV}}
+\newcommand{\Cov}{\mathrm{Cov}}
+
+\title{\textbf{DCR-Attention: Exact Q-Axis Sparse Decode at Production Scale}\\[2pt]
+\large A Measured Scaling Law and Retention of Long-Range Dependence,\\ under
+Matched-Control Discipline}
+
+\author{Evgeny Vyaltsev\thanks{Correspondence: ORCID 0009-0004-3712-6798.
+Code and registered runs: \texttt{github.com/Seqev/dcr-attention}; archival
+DOI via Zenodo.} \and Daniil Vyaltsev}
+
+\date{May 31, 2026 --- preprint (Zenodo release \texttt{paper-v1.0})}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Sparse-attention methods for autoregressive decode establish quality at moderate
+context lengths but are rarely characterised at the production scales
+($N\ge 10\text{K}$ tokens) where they would be deployed, and almost never validated
+under a control for the magnitude of the claim being made. We assemble four
+mutually reinforcing results around a single object --- the concentration of the
+softmax attention distribution --- and validate every quantitative claim under a
+matched-control discipline that we make explicit. First, the Q-axis ranking of
+DCR-Attention is an \emph{exact} algebraic identity (Theorem~1), confirmed against
+brute-force $QK^\top$ top-$k$ on $45/45$ configurations with mean Jaccard overlap
+$\ge 0.998$. Second, Q-axis quality \emph{strengthens} with scale: relative
+perplexity degradation drops to $\dPPL=+0.118\%$ at $N=8\text{K}$ with $50\%$
+compute saving, which we ground in the sub-logarithmic growth of decode-attention
+entropy, $H_N=\alpha\log N+\beta$ with measured $\alpha\approx 0.31$, formalised as
+$\dPPL(N)=O\!\big(N^{-(1-\alpha)}\big)$ (Theorem~3, descriptive). Third, sparse
+decode retains dependence on a distant required key with no measurable selectivity
+loss versus full attention (paired-CI, wrong-needle differential
+$\text{CI}_{\text{upper}}\le 0.05$) up to $N=128\text{K}$, and does so by
+\emph{genuinely selecting} the needle; at extreme coverage the fact delocalises and
+accuracy ceases to indicate the memory mechanism. Fourth, a per-query certificate
+$\varepsilon\le 2W e^{H(\alpha(q))}/k_{\mathrm{eff}}$ supplies a checkable accuracy
+guarantee with zero observed false negatives over $45$ calibration cells. A
+multi-batch profiling study shows the Python reference path collapses between
+batch~4 and~8 via an allocator-induced memory wall, establishing that a fused
+Triton kernel (measured $1.21\times$ over SDPA for the ABKV variant) is a structural
+prerequisite, not an optimisation. The methodology section reports a worked
+matched-control \emph{null} that closed an earlier spectral-mechanism hypothesis,
+and we carry the same discipline --- pre-registration, magnitude-matched
+intervention, scope honesty, and an explicit retraction ledger --- throughout. All
+claims are scoped to Llama-3.2-1B, WikiText-2, recency window $64$.
+\end{abstract}
+
+\tableofcontents
+
+%==================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Modern autoregressive language models operate over context windows of tens of
+thousands of tokens, yet quality validation of sparse-attention methods has lagged:
+published decode-quality results typically cap at $N\le 1024$ tokens. A method that
+works at $N=500$ can silently fail at $N=8\text{K}$, and the ``obvious''
+extrapolation can be quantitatively wrong in either direction. A second, subtler gap
+is methodological: mechanistic and quantitative claims about attention are rarely
+subjected to a control for the \emph{magnitude} of the intervention or the strength
+of the assertion, and uncontrolled claims tend to confirm whatever hypothesis
+motivated them.
+
+\paragraph{Prior result we extend.} In earlier work we established Q-axis
+rank-local sparse attention as the mathematically optimal axis choice for
+autoregressive decode: for a decode query $Q$ and cached keys $\{K_j\}$, ranking by
+the projection onto $\uQ=Q/\|Q\|_2$ is identical to ranking by attention score
+(Theorem~1, restated in \S\ref{sec:theory}). That work validated the identity at
+$N\le 500$ and reported a large quality advantage over a PCA-axis baseline, but
+explicitly limited validation due to diagnostic memory constraints. Three
+production-relevant questions remained open: (Q1) does the quality advantage scale
+to long context? (Q2) does the baseline failure scale comparably or relax? (Q3) is
+there a deployable latency operating point?
+
+\paragraph{Contributions.} This paper answers all three and adds two results that
+were not in scope before --- a long-range-retention characterisation and a per-query
+correctness certificate --- assembled under a single explicit discipline. In order
+of novelty:
+\begin{enumerate}[leftmargin=1.4em,itemsep=1pt]
+\item \textbf{Exact ranking (Theorem~1).} A training-free identity, non-falsifiable
+by ablation because it is algebra; empirically confirmed on $45/45$ brute-force
+configurations (\S\ref{sec:scaling}).
+\item \textbf{A measured scaling law (Theorem~3).} $\dPPL(N)=O(N^{-(1-\alpha)})$ for
+measured $\alpha\approx0.31$, with two independent empirical confirmations; stated
+as a \emph{description}, not a mechanism (\S\ref{sec:theory},
+\S\ref{sec:scaling}).
+\item \textbf{Retention of long-range dependence (\S\ref{sec:retention}).} A
+pre-registered staircase of needle tasks shows sparse decode retains a distant
+required key with no measurable selectivity loss up to $N=128\text{K}$ for
+coverage $c\gtrsim0.10$, via true selection; and a leakage dissociation at extreme
+coverage.
+\item \textbf{Per-query certificate (\S\ref{sec:theory}).} A runtime-checkable bound
+$\varepsilon\le 2W e^{H(\alpha(q))}/k_{\mathrm{eff}}$ with an exponential-decay
+false-negative guarantee, plus an exact non-asymptotic error identity.
+\item \textbf{A memory-wall systems result (\S\ref{sec:systems}).} The Python
+masked-dense path fails between batch~4 and~8 through allocator fragmentation; the
+ABKV fused kernel recovers a measured $1.21\times$ over SDPA.
+\item \textbf{A matched-control methodology (\S\ref{sec:method}).} The discipline
+that validates the above, with a worked null from a closed spectral programme and an
+explicit retraction ledger (\S\ref{sec:limitations}).
+\end{enumerate}
+
+%==================================================================
+\section{Background and related work}
+\label{sec:background}
+
+\paragraph{Q-axis recap.} For a single decode step with query $Q\in\mathbb{R}^d$ and
+cached keys $K\in\mathbb{R}^{N\times d}$, the attention output is
+$\Attn(Q,K,V)=\softmax(QK^\top/\sqrt{d})\,V$. Q-axis rank-local attention sets the
+ordering axis $\uQ=Q/\|Q\|_2$, sorts keys by the projection $K_j\!\cdot\!\uQ$, and
+admits the top-$k_{\mathrm{eff}}$ keys to the softmax. The DCR (Detect--Choose--Route)
+dispatcher applies this rank-local primitive only when a coherence test on $Q$ passes
+and otherwise falls back to dense attention.
+
+\paragraph{Selection-based sparse attention.} The dominant decode-time family selects
+a subset of keys per query: StreamingLLM (sink + recency), H2O (accumulated
+attention), SnapKV (last-window scores), Quest (query-aware page min/max proxies),
+InfLLM (block representative vectors), RetrievalAttention (CPU-resident ANN with an
+OOD-aware bridge), and ParisKV (drift-robust, million-token). All are training-free;
+DCR-Attention sits in this family but is the only member whose ranking criterion is
+\emph{exact} (Theorem~1).
+
+\paragraph{Trained sparse attention.} NSA learns the sparsity pattern jointly with
+the model; DSA (DeepSeek-V3.2) trains a lightning indexer
+$I_{t,s}=\sum_j w_{j}\,\mathrm{ReLU}(q_{j}\!\cdot\!k_{s})$ in a two-stage warm-up and
+ships in production with kernel support; GLM-5 adopts the same paradigm; HISA
+accelerates DSA with a hierarchical indexer. These reach better quality on their own
+training distribution but require continued pre-training and extra parameters. Q-axis
+is training-free and applies to any pre-trained checkpoint.
+
+\paragraph{Low-rank and dimensional methods.} Loki exploits the empirically low
+effective rank of key tensors ($\sim80$ of $128$) to cut data movement;
+EigenAttention and EliteKV compress $K/V$ via SVD or RoPE-frequency selection; MLA
+caches a single low-dimensional latent per token. A natural extension of Q-axis is to
+operate in the top-$r$ PCA subspace of $K$, preserving exactly the inner product
+ranked by Theorem~1 (\S\ref{sec:future}).
+
+\paragraph{Theory of top-$k$ truncation.} Recent work derives the exact identity
+$\TV(P,\hat P)=1-e^{-\mathrm{KL}(\hat P\|P)}$ and a head--tail decomposition that we
+use in the proof of Theorem~3, and separately observes that low-entropy states are
+better adapted to top-$k$ decoding --- qualitatively consistent with our
+Assumption~2, but without a scaling law in $N$. We discuss precedence in
+\S\ref{sec:distinction}.
+
+%==================================================================
+\section{Theory: entropy concentration}
+\label{sec:theory}
+
+\subsection{Exact Q-axis ranking}
+
+\begin{theorem}[Q-axis equivalence]
+\label{thm:qaxis}
+For any decode query $Q\in\mathbb{R}^d$ with cached keys
+$\{K_j\}_{j=1}^N\subset\mathbb{R}^d$, the ordering induced by the projection axis
+$\uQ:=Q/\|Q\|_2$ is identical to the ordering by attention score:
+\[
+\langle \uQ,K_i\rangle > \langle \uQ,K_j\rangle
+\;\Longleftrightarrow\;
+\langle Q,K_i\rangle > \langle Q,K_j\rangle .
+\]
+\end{theorem}
+
+The statement is an algebraic identity: $\langle Q,\cdot\rangle=\|Q\|_2\,\langle
+\uQ,\cdot\rangle$ and $\|Q\|_2>0$, so the two orderings coincide exactly (modulo ties
+at \texttt{bf16} precision). It is therefore \emph{not} falsifiable by ablation; the
+proof is recorded in Appendix~\ref{app:proof-thm1}. The practical consequence is that
+the top-$k_{\mathrm{eff}}$ keys selected by the $O(d)$ projection are exactly the
+top-$k_{\mathrm{eff}}$ keys by attention score, with no learning and no approximation.
+
+\subsection{Entropy concentration and asymptotic strengthening}
+
+Let $H_N=-\sum_i p_{N,i}\log p_{N,i}$ denote the attention entropy at a decode step
+with cache size $N$, where $p_{N,i}=\softmax(Q\!\cdot\!K_i/\sqrt{d})_i$. Empirically,
+for transformer decode on natural language, $H_N$ grows sub-logarithmically in $N$:
+\begin{equation}
+\label{eq:entropy}
+H_N=\alpha\log N+\beta+o(1),\qquad \alpha<1.
+\end{equation}
+For Llama-3.2-1B on WikiText-2 we measure $\alpha\approx0.31$ averaged over heads and
+decode positions $t\in[64,N]$, against the uniform-attention reference $\alpha=1$. The
+effective number of relevant keys $\Keff(N):=e^{H_N}$ therefore grows much slower than
+$N$: at $N=20\text{K}$ we measure $\Keff\approx87$, a sparsity ratio
+$\Keff/N\approx0.4\%$.
+
+\begin{assumption}[Entropy concentration]
+\label{ass:entropy}
+There exist $\alpha<1$ and $\beta\in\mathbb{R}$ such that the per-step attention
+entropy satisfies $H_N=\alpha\log N+\beta+o(1)$ as $N\to\infty$.
+\end{assumption}
+
+\begin{theorem}[Asymptotic strengthening of Q-axis with adaptive coverage]
+\label{thm:scaling}
+Under Assumption~\ref{ass:entropy} with $\alpha<1$, Q-axis rank-local attention with
+adaptive coverage floor $c_{\mathrm{floor}}>0$ achieves perplexity degradation
+$\dPPL(N)=O\!\big(N^{-(1-\alpha)}\big)$; the relative degradation strictly decreases
+with $N$.
+\end{theorem}
+
+The proof (Appendix~\ref{app:proof-thm3}) admits $k_{\mathrm{eff}}=\lfloor
+c_{\mathrm{floor}}N\rfloor$ keys; under Assumption~\ref{ass:entropy} the ratio
+$k_{\mathrm{eff}}/\Keff\sim N^{1-\alpha}$ grows unboundedly, the captured probability
+mass approaches $1$, and the truncated tail mass $\tau_N=\TV(P_N,\hat P_N)$ decays as
+$O(N^{-(1-\alpha)})$ via the head--tail decomposition. For $\alpha=0.31$, Theorem~3
+predicts $\dPPL(N)\propto N^{-0.69}$.
+
+\begin{remark}[Head-wise non-vacuity]
+The worst-head exponent $\alpha^*=\max_h\alpha_h$ controls the rate; for all twelve
+heads of Llama-3.2-1B we measure $\alpha_h\in[0.22,0.39]$, so the guarantee is
+non-vacuous head-wise.
+\end{remark}
+
+We emphasise that Theorem~\ref{thm:scaling} is stated as a \emph{description}: the
+exponent $\alpha$ is measured per model, not derived from first principles, and the
+result is not claimed as a mechanism. \S\ref{sec:method} explains why this scoping is
+load-bearing, and \S\ref{sec:future} states the pre-registered causal test (Gap-1)
+that would upgrade or honestly close it.
+
+\subsection{A per-query certificate and the exact error geometry}
+\label{sec:certificate}
+
+Beyond the asymptotic rate, a per-query bound gives a runtime-checkable guarantee. For
+a query $q$ with rank-local entropy $H(\alpha(q))$ and top-$k_{\mathrm{eff}}$ selection,
+the rank-local attention error is bounded by
+\begin{equation}
+\label{eq:certificate}
+\varepsilon \;\le\; 2W\,\frac{e^{H(\alpha(q))}}{k_{\mathrm{eff}}}
+\;=\; 2W\exp\!\big(H(\alpha(q))-\log k_{\mathrm{eff}}\big),
+\end{equation}
+with $W$ a value-range constant. A dispatcher (Detector~v2,
+Appendix~\ref{app:detector}) converts \eqref{eq:certificate} into a routing decision in
+$O(Nd)$ overhead with an exponential-decay bound on the false-negative rate, validated
+on $45$ calibration cells with \emph{zero} observed false negatives. Unlike fixed
+sparse or low-rank schemes, the approximation carries a checkable per-input guarantee.
+
+The bound is matched by an exact non-asymptotic identity. Writing $\gamma$ for the
+renormalisation residual with $\sum_i\gamma_i=0$ and $K$ for the value-vector Gram
+matrix, the rank-local output error satisfies, at every finite $k$,
+\begin{equation}
+\label{eq:vgram}
+\varepsilon^2=\sum_{i,j}\gamma_i\gamma_j K_{ij}.
+\end{equation}
+A common-mode (rank-1) cancellation theorem then shows the rank-1 component of $K$
+vanishes identically, yielding $\varepsilon^2=\sigma_{\mathrm{eff}}^2\,\psi(\alpha,k)+R$
+with effective trace $\sigma_{\mathrm{eff}}^2=K_{ii}-\bar c$ rather than the naive
+$\mathrm{tr}\,\Sigma$. We validate this refined formula on Llama-3.2-1B across $16$
+layers and $4$ heads to within $0.5\%$ aggregate accuracy. A controlled negative result
+(\S\ref{sec:limitations}, R4) establishes that the asymptotic tail-equivalence
+$\psi(\alpha,k)\to\tau_k^2$ \emph{fails} at operational truncation budgets, so the
+often-cited closed form $\alpha^*=r-\tfrac12$ is not predictive at any attainable $k$;
+\eqref{eq:vgram} is used directly instead.
+
+%==================================================================
+\section{Empirical scaling}
+\label{sec:scaling}
+
+\paragraph{Setup.} Llama-3.2-1B (\texttt{bf16}); RTX 4060 Ti under WSL2;
+PyTorch~2.5.1+cu121, transformers~5.6.2; WikiText-2 validation, teacher-forced decode;
+$T_{\mathrm{dispatch}}=64$, $k_{\min}=64$.
+
+\paragraph{Quality scaling.} Table~\ref{tab:quality} reports measured $\dPPL$ at four
+context lengths. The rank-window hero entry is $N=20\text{K}$, $c_{\mathrm{floor}}=0.5$:
+$+0.308\%$ at $50\%$ compute saving --- $1.6\times$ better than at $N=500$. The trend is
+strictly improving with $N$ at fixed coverage, as Theorem~\ref{thm:scaling} predicts.
+
+\begin{table}[t]
+\centering
+\caption{Quality scaling: measured $\dPPL$ for Q-axis DCR (rank-window) vs.\ full
+attention on Llama-3.2-1B, WikiText-2.}
+\label{tab:quality}
+\begin{tabular}{rrrrrr}
+\toprule
+$N$ & $c_{\mathrm{floor}}$ & $\mathrm{PPL}_{\text{base}}$ & $\mathrm{PPL}_{\text{DCR}}$ & $\dPPL$ & $\Keff/N$ \\
+\midrule
+500    & 0.8 & 6.815 & 6.850 & $+0.507\%$ & 0.20 \\
+2{,}000  & 0.5 & 6.561 & 6.618 & $+0.871\%$ & 0.16 \\
+5{,}000  & 0.5 & 6.482 & 6.517 & $+0.537\%$ & 0.14 \\
+20{,}000 & 0.5 & 6.779 & 6.800 & $+0.308\%$ & 0.11 \\
+20{,}000 & 0.3 & 6.779 & 6.830 & $+0.759\%$ & 0.11 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{PCA baseline collapse at scale.} The PCA-axis baseline degrades
+catastrophically with $N$: at $N=2\text{K}$ it produces $+382\%$ PPL with $36\times$
+decode-step latency versus SDPA, so the Q-axis advantage grows from $149\times$ at
+$N=500$ to $438\times$ at $N=2\text{K}$, while the latency gap widens $5\times\to
+36\times$ (the PCA SVD cost grows with $N$; Q-axis projection is $O(d)$). The trajectory
+makes the directional claim definitive without measuring larger $N$.
+
+\paragraph{Direct top-$k$ vs.\ rank-window, and empirical Theorem~1.} Rank-window
+enforces a contiguity constraint absent from Theorem~1; removing it (direct top-$k$)
+improves $\dPPL$ by $3.06$--$3.32\times$ at iso-coverage (Table~\ref{tab:m1}). The same
+$\sim\!3\times$ margin appears independent of $c_{\mathrm{floor}}$ and $N$: it is the
+contiguity penalty of rank-window measured directly, not implementation drift. The
+direct-top-$k$ reference was tested against brute-force $QK^\top$ top-$k$ on $45$
+configurations ($5$ seeds $\times$ $3$ values of $N\in\{500,1\text{K},2\text{K}\}$
+$\times$ $3$ values of $k_{\mathrm{eff}}/N$): mean Jaccard overlap $\ge0.9983$, minimum
+$0.9868$; the residual $\sim10^{-3}$ disagreement is concentrated at the
+$k_{\mathrm{eff}}$-th boundary under \texttt{bf16} ties. Theorem~1 is confirmed
+empirically on $45/45$ tests.
+
+\begin{table}[t]
+\centering
+\caption{M1 diagnostic gate: rank-window vs.\ direct top-$k$ under Theorem~1.}
+\label{tab:m1}
+\begin{tabular}{lrrrr}
+\toprule
+Configuration & $\mathrm{PPL}_{\text{base}}$ & rank-window $\dPPL$ & top-$k$ $\dPPL$ & ratio \\
+\midrule
+$N=500$, $c=0.8$   & 6.8150 & $+0.507\%$ & $+0.153\%$ & $3.32\times$ \\
+$N=2{,}000$, $c=0.5$ & 6.5610 & $+0.871\%$ & $+0.285\%$ & $3.06\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Production-scale Pareto sweep and a second Theorem~3 confirmation.}
+Table~\ref{tab:pareto} reports the direct-top-$k$ sweep. At $c_{\mathrm{floor}}=0.5$,
+$\dPPL$ drops from $+0.285\%$ ($N=2\text{K}$) to $+0.118\%$ ($N=8\text{K}$), a
+$2.42\times$ improvement over a $4\times$ scale increase. Theorem~\ref{thm:scaling}
+predicts $4^{0.69}=2.66\times$; the measured $2.42\times$ matches within the $o(1)$
+correction of \eqref{eq:entropy}. The production-scale sweet spot
+$N=8\text{K}$, $c_{\mathrm{floor}}=0.5$ delivers $\dPPL=+0.118\%$ at $50\%$ compute
+saving --- below a $1\%$ deployment threshold by an order of magnitude.
+
+\begin{table}[t]
+\centering
+\caption{Top-$k$ Pareto sweep on Llama-3.2-1B, WikiText-2 (direct top-$k$ reference).}
+\label{tab:pareto}
+\begin{tabular}{rrrl}
+\toprule
+$N$ & $c_{\mathrm{floor}}$ & top-$k$ $\dPPL$ & note \\
+\midrule
+500    & 0.8 & $+0.153\%$ & paper-canonical \\
+2{,}000  & 0.8 & $+0.153\%$ & top-end Pareto \\
+2{,}000  & 0.5 & $+0.285\%$ & moderate \\
+2{,}000  & 0.3 & $+0.687\%$ & aggressive \\
+8{,}000  & 0.5 & $+0.118\%$ & production sweet spot \\
+8{,}000  & 0.3 & $+0.412\%$ & production aggressive \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Statistical significance of the hero result.} Per-step $\Delta$NLL at
+$N=20\text{K}$: mean $+0.0031$, std $0.0818$, $n=19{,}936$ DCR-active steps, standard
+error $5.8\times10^{-4}$, $z=5.32$, $p\ll10^{-6}$. The mean is distinct from zero with
+high confidence, but its magnitude sits within the \texttt{bf16} cumulative noise
+floor and the std is an order of magnitude larger than the mean: the residual is
+dominated by jitter, not bias. We report this honestly rather than as a clean
+positive.
+
+%==================================================================
+\section{Retention of long-range dependence}
+\label{sec:retention}
+
+Iso-perplexity does not imply iso-retrieval. We ask a distinct, load-bearing question:
+does top-$k$ sparse decode preserve dependence on a distant key that the answer
+actually requires? The study is a pre-registered staircase on a bit-for-bit restored
+system (live correctness re-verified: logit $\Delta=0$, cache ratio $0.50783$,
+$\dPPL=+0.714\%$). Two matched arms throughout: \textbf{DENSE} (all-SDPA, the
+$c$-independent control) and \textbf{SPARSE} (Q-axis top-$k$, all-DCR). Route counters
+are verified per cell so a silent SDPA fallback invalidates a cell; the prefill
+confound is re-confirmed each run so that hits are decode-attributable. Fixed config:
+$B=1$, greedy decode, \texttt{fp32} softmax, $k_{\text{window}}=64$, hero coverage
+$c=0.15$.
+
+\paragraph{Gate v1 --- single-needle (sanity).} One unique 7-digit code in homogeneous
+filler; $N\in\{8\text{K},32\text{K},128\text{K}\}$, needle depth outside the recency
+window. All twelve cells: $\text{dense}=\text{sparse}=1.000$. Top-$k$ does not drop a
+sole salient needle. Necessary, not sufficient (no headroom).
+
+\paragraph{Gate v2 --- exact-id multi-needle (uninformative by design).} Querying a
+needle by a unique 4-digit id is a lexical escape hatch: distractors with different ids
+do not compete, so selection under competition is never tested. Sparse was
+byte-identical to dense. The design lesson dictated v3. (A methodological note: a pilot
+cell read $0.80$ at $n=5$ and regressed to $0.99$ at $n=100$ --- a phantom boundary that
+point-thresholding would have reported and that paired-CI plus a monotone-neighbour rule
+correctly rejected.)
+
+\paragraph{Gate v3 --- soft disambiguation (the gate that bit).} Three harder modes
+force genuine selection: \emph{neardup} (near-duplicate ids, Hamming-1),
+\emph{semantic} (no id in query; needle keyed by a unique attribute), and
+\emph{multihop} (answer requires chaining). With paired bootstrap CI and a grid-aware
+monotone verdict, the failure criterion is
+$\text{CI}_{\text{upper}}(\text{dense}-\text{sparse correct})>0.05$ or the analogous
+wrong-needle differential $>0.05$. Result: multihop \emph{floors} in all nine cells
+(the 1B base cannot do implicit 2-hop in a forward pass --- a property of the base,
+\emph{not} a sparse failure, excluded per pre-registration); neardup/semantic enter the
+informative band at higher $K/N$ (dense $0.40$--$0.93$). On all ten informative cells:
+\emph{zero} FAILs. In the hard cells dense itself has a high wrong-needle error rate,
+and sparse \emph{reproduces dense's error rate and pattern}: the wrong-needle
+differential, the core selectivity signal, has $\text{CI}_{\text{upper}}\le0.05$ in
+every cell. \textbf{Verdict: ROBUST at $c=0.15$.}
+
+\paragraph{Coverage sweep --- the boundary is in $N$, not $c$.} Holding the v3
+informative cells and sweeping $c\in\{0.15,0.10,0.05,0.02\}$ on paired prompts, every
+$N\le32\text{K}$ cell holds down to $c=0.02$, while the $N=131072$ cells fail. Two
+findings, by confidence:
+\begin{itemize}[leftmargin=1.4em,itemsep=1pt]
+\item \textbf{(F1, confirmed)} Retention holds to $c\approx0.10$ on all $N$ up to
+$128\text{K}$ via genuine selection: at $c=0.15$ correct answers occur \emph{because}
+top-$k$ selects the needle.
+\item \textbf{(F2, confirmed) Leakage dissociation.} At $c=0.02$ on $128\text{K}$, a
+large fraction of \emph{correct} answers occur with the needle \emph{not} in top-$k$
+(out-corr/correct up to $0.70$ on semantic/4). Accuracy ceases to be a valid indicator
+of the memory mechanism: the fact has delocalised into other tokens during prefill.
+This is a genuine mechanistic result with a direct compression corollary.
+\end{itemize}
+
+\paragraph{What is deferred (in progress, not claimed).} The failure mode at the
+$128\text{K}$ boundary is, on current data, \emph{starvation}-leaning (the starvation
+differential CI excludes zero) while \emph{mis-selection} is not statistically
+established --- the inverse of an earlier ``critical semantic capacity'' framing, which
+does not survive (a cell with $k_{\mathrm{eff}}=19{,}666$ fails while one with
+$k_{\mathrm{eff}}=1{,}602$ holds, so there is no absolute-$k_{\mathrm{eff}}$ threshold).
+We do \emph{not} report the boundary mechanism as decided: a causal oracle-inject probe
+and an anti-inject validation of the needle-in-top-$k$ metric are required, together
+with a multi-seed replication of the boundary and a TTFT/decode latency decomposition,
+before the boundary is a publishable claim (\S\ref{sec:future}).
+
+\paragraph{Honest one-paragraph claim.} On Llama-3.2-1B, Q-axis top-$k$ sparse decode
+retains dependence on a distant required key with no measurable selectivity loss versus
+full attention across single-needle, near-duplicate, and semantic multi-needle
+competition, at context lengths to $128\text{K}$, for coverage $c\gtrsim0.10$, and does
+so by genuinely selecting the needle. The retention boundary appears only at the
+extreme of $c\approx0.02$ and only at $N=131072$; at that extreme accuracy dissociates
+from the memory mechanism. All claims are at fixed $k_{\text{window}}=64$ on a single
+base model; the synthesis (multi-hop) regime is untestable on this base.
+
+%==================================================================
+\section{Systems: kernel design and the multi-batch wall}
+\label{sec:systems}
+
+\paragraph{Profiling the Python path.} At $N=20\text{K}$, $c_{\mathrm{floor}}=0.5$ the
+Python masked-dense path totals $58$\,ms/step, dominated by the full $QK^\top$ plus mask
+application ($\sim30$\,ms) --- wasteful, since $k_{\mathrm{eff}}=0.5N$ keys are discarded
+post-softmax. SDPA measures $33$\,ms; a fused top-$k$ kernel targets $14$\,ms
+($2.4\times$ over SDPA, $4.1\times$ over Python).
+
+\paragraph{Per-pass profiling and a corrected bottleneck claim.} A per-pass profile on
+the hero configuration L4 ($N=32\text{K}$, $B=4$, $c=0.15$) shows Pass-2
+(\texttt{torch.argsort} stable, \texttt{fp32}) dominates at $74.4\%$ of end-to-end M4
+(Table~\ref{tab:perpass}); Pass-3 is only $10.9\%$. This \emph{corrects} an earlier
+hypothesis that flagged Pass-3 as the bottleneck (\S\ref{sec:limitations}, R8) and
+reframes the kernel value proposition: eliminate the dominant Pass-2 stable-sort cost.
+
+\begin{table}[t]
+\centering
+\caption{Per-pass decode latency (mean ms), hero L4 ($N=32\text{K}$, $B=4$, $c=0.15$),
+RTX 4060 Ti.}
+\label{tab:perpass}
+\begin{tabular}{lrr}
+\toprule
+Stage & L4 (ms) & share of M4 \\
+\midrule
+$u_Q$            & 0.042 & 1.0\% \\
+Pass-1 (Triton)  & 0.596 & 13.6\% \\
+Pass-2 (\texttt{argsort}) & 3.268 & \textbf{74.4\%} \\
+Pass-3 (fused)   & 0.478 & 10.9\% \\
+\midrule
+M4 end-to-end    & 4.395 & --- \\
+SDPA             & 3.949 & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{ABKV: a prefix kernel that eliminates decode-time selection.} The ABKV
+variant (mode~A) pre-sorts $K/V$ once at prefill along a per-head axis
+$\text{axis\_vec}[h]=\mathrm{normalize}(\mathrm{mean}(K/\|K\|))$ and at decode reads the
+$k_{\mathrm{eff}}$-prefix $K_{\text{sorted}}[:k_{\mathrm{eff}}]$ directly through a fused
+online-softmax kernel --- \emph{no} decode-time projection or sort. With the e2e anchor
+($\text{SDPA}=201.0$\,ms, $M4=228.7$\,ms, both within $\pm2\%$ of the published
+baseline), the non-attention overhead is $158.4$\,ms, ABKV retains only the $0.478$\,ms
+Pass-3 per layer, giving an estimated $166.1$\,ms end-to-end and a predicted
+$\mathbf{1.21\times}$ over SDPA --- $95.4\%$ of the theoretical ceiling $1.269\times$
+(set by non-attention work alone, out of attention scope). A rerank fallback (mode~B)
+bounds the worst case if a quality gate triggers.
+
+\paragraph{Triple-tier validation.} We do not claim bitwise equivalence (\texttt{bf16}
+reductions are non-associative). Acceptance requires all three tiers: (T1, numerical)
+$|\Delta\text{NLL}/\text{tok}|\le5\times10^{-4}$ for $\ge99\%$ of steps over an
+$N=5\text{K}$ trace, max $\le5\times10^{-3}$; (T2, statistical)
+$|\mathrm{PPL}_{\text{kernel}}-\mathrm{PPL}_{\text{ref}}|/\mathrm{PPL}_{\text{ref}}\le0.05\%$
+over $3$ runs; (T3, algorithmic) top-$k$ overlap $\ge0.999$, $\cos(u^{\text{kernel}}_Q,
+u^{\text{ref}}_Q)\ge0.9999$, exact mask sparsity.
+
+\paragraph{The multi-batch memory wall.} Profiling the Python DCR path against SDPA at
+$N=5\text{K}$ (Table~\ref{tab:memwall}) reveals a pathology more severe than predicted.
+Python DCR scales sublinearly from $B=1$ to $B=4$ ($0.32\times$ per element), but at
+$B=8$ peak memory hits the entire $16$\,GB of the device, per-step latency degrades from
+$43$\,ms to over $2000$\,ms by step $4{,}500$, and the run terminates. The model
+($2.5$\,GB) and KV-cache ($128$\,MB) fit comfortably; the $13{+}$\,GB excess is
+non-fused intermediate tensors (top-$k$ dispatch buffers, scatter/gather state,
+masked-softmax intermediates) whose sizes vary with adaptive coverage, so PyTorch's
+caching allocator cannot reclaim them across steps. SDPA, a single fused kernel, shows
+no such pathology. The fused kernel of \S\ref{sec:systems} eliminates the entire
+allocation chain. \textbf{The kernel rewrite is therefore a structural prerequisite for
+production deployment, not an optimisation.}
+
+\begin{table}[t]
+\centering
+\caption{Multi-batch profiling at $N=5\text{K}$, RTX 4060 Ti ($16$\,GB).}
+\label{tab:memwall}
+\begin{tabular}{llrrrr}
+\toprule
+Path & Batch & lat/step & lat/elem & GPU util & peak VRAM \\
+\midrule
+Python DCR & 1 & 43.0\,ms & 43.0\,ms & $\sim$57\% & --- \\
+Python DCR & 4 & 54.8\,ms & 13.7\,ms & 96\% & 3.48\,GB \\
+Python DCR & 8 & OOM thrash & $>$60 (deg.) & 100\% thrash & 16.0\,GB \\
+SDPA & 1 & 30.4\,ms & 30.4\,ms & 63\% & 2.69\,GB \\
+SDPA & 4 & $\sim$35\,ms & 8.8\,ms & 91\% & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%==================================================================
+\section{Methodology: matched-control discipline}
+\label{sec:method}
+
+The quantitative claims above are validated under a discipline we make explicit,
+because it is the discipline --- not any single number --- that lets the claims survive.
+It originates in a worked \emph{null} from a closed companion programme.
+
+\paragraph{A worked example (the closed spectral programme).} The free-energy Hessian
+of an attention head can be written $H=-\beta\,\Cov_p(k)$, and on trained models it is
+typically spike-dominated. The hypothesis under test was that this dominant mode is a
+privileged computational object whose removal should selectively damage next-token
+prediction. The natural intervention --- project out the dominant direction, then
+rescale to preserve $\|K\|_F$ --- preserves the \emph{wrong} invariant. Removing the
+dominant direction deletes a large key component; removing a bulk direction deletes a
+tiny one; rescaling to a common $\|K\|_F$ leaves a perturbation-norm asymmetry
+$\|\delta K\|_F$ of $10$--$30\times$ (for one early-layer head, $M_T\approx84.9$ vs.\
+$M_C\approx15.8$). An uncontrolled smoke run accordingly showed the treatment producing
+$\sim18\times$ the control's KL --- ``a striking positive,'' and entirely consistent
+with the dominant mode being computationally irrelevant. The asymmetry was caught not by
+inspecting the result but by directly measuring $\|\delta K\|_F$ before the full run.
+
+\paragraph{The three-component checklist.}
+\begin{enumerate}[leftmargin=1.4em,itemsep=1pt]
+\item \textbf{Matched-magnitude intervention.} Match the \emph{perturbation norm}
+$\|\delta\|$ applied to the model --- not an indirect invariant such as $\|K\|_F$. We
+scaled both treatment and control to $T=\min(M_T,M_C)$ per layer--head pair; the verified
+treatment-to-control ratio was $1.000$ on every pair.
+\item \textbf{A random-spectrum baseline.} Before attributing significance to a spectral
+object, check whether a random spectrum exhibits the same property. A three-statistic
+coupling that looked like trained structure was reproduced exactly by random spectra ---
+an algebraic identity among monotone functions of spectral peakedness, not a property of
+the network.
+\item \textbf{Pre-registered outcome criteria.} Fix, before running, what each outcome
+means, so a null is as reportable as a positive and there is no post-hoc freedom to
+reinterpret.
+\end{enumerate}
+
+\paragraph{Result of applying the framework.} On Llama-3.2-1B over WikiText-2 (twelve
+layer--head pairs, $25$ prompts each, $300$ measurements, context $256$), the
+matched-control ablation returned a pre-registered \emph{null}
+(Table~\ref{tab:matched}): the treatment-minus-control next-token NLL differential is
+$+2.72\times10^{-4}$, $95\%$ CI $[-1.7,7.0]\times10^{-4}$ bracketing zero, Wilcoxon
+$p=0.26$. Suppressing the dominant spectral mode harms prediction no more than
+suppressing a random mode of equal perturbation magnitude. Note that the \emph{KL}
+differential \emph{is} significant ($p<10^{-38}$) --- a dissociation that itself argues
+for choosing the operationally meaningful metric (NLL) before running.
+
+\begin{table}[t]
+\centering
+\caption{Matched-control ablation of the dominant spectral mode. NLL --- the
+operationally meaningful metric --- gives a differential whose $95\%$ CI brackets zero.}
+\label{tab:matched}
+\begin{tabular}{lrrrr}
+\toprule
+Metric & $\Delta_{\text{treat}}$ & $\Delta_{\text{ctrl}}$ & differential & Wilcoxon $p$ \\
+\midrule
+NLL (next-token)   & $5.95\times10^{-4}$ & $3.23\times10^{-4}$ & $+2.72\times10^{-4}$ & 0.26 \\
+KL (distribution)  & $1.31\times10^{-3}$ & $7.81\times10^{-4}$ & $+5.32\times10^{-4}$ & $<10^{-38}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Why this is the spine.} The lesson is reproducible, not philosophical: the
+same attention geometry, on the same model and dataset, was \emph{falsified} as a
+mechanism and \emph{survived} as a description and as algebra. We therefore apply the
+checklist as the validation standard for every quantitative claim in this paper, and we
+state in \S\ref{sec:future} the pre-registered matched-control test that would apply it
+to Theorem~\ref{thm:scaling} itself.
+
+%==================================================================
+\section{Distinction from concurrent work}
+\label{sec:distinction}
+
+The mainstream sparse-attention literature converges on ``token-relevance indexer +
+top-$k$ selection + sparse downstream attention,'' differing in (a) whether the indexer
+is trained or training-free and (b) whether the criterion has formal guarantees. Ours is
+the only training-free path with an \emph{exact} ranking guarantee (Theorem~1) plus a
+\emph{closed-form scaling law} (Theorem~3) and a \emph{per-query certificate}
+(\S\ref{sec:certificate}). Theorem~1 is a special case of the MIPS-as-query-scaled-NNS
+equivalence with $\uQ=Q/\|Q\|_2$ specific to attention. Concurrent theory derives a
+TV-distance bound for top-$k$ truncation (which we use) and observes qualitatively that
+low-entropy states suit top-$k$ decoding, but does not derive a scaling law in $N$; our
+measured exponent $\alpha$ and the rate $O(N^{-(1-\alpha)})$ are the new content. We
+note the precedence pressure honestly: the qualitative entropy$\leftrightarrow$top-$k$
+observation is already public, which is part of why we release for priority now and scope
+the scaling claim as descriptive pending the causal test.
+
+%==================================================================
+\section{Limitations and retraction ledger}
+\label{sec:limitations}
+
+\paragraph{Limitations.} Single model family (Llama-3.2-1B) and single dataset
+(WikiText-2); $\alpha$ may differ across architectures and domains. Triton/ABKV figures
+are partly projected from measured anchors; the memory-wall finding is preliminary and
+requires the kernel rewrite to enable batched validation. Retention claims are at fixed
+$k_{\text{window}}=64$ on one base; multihop floors on the 1B base. KV-cache memory is
+not addressed (orthogonal and complementary to Q-axis).
+
+\paragraph{Retraction ledger.} In the interest of an honest permanent record, we list
+hypotheses entertained in the programme and \emph{retracted}, with how each fell:
+\begin{description}[leftmargin=2.2em,itemsep=1pt]
+\item[R1] Spectral geometry as a computational \emph{mechanism} (dominant mode
+load-bearing) --- matched-magnitude null (\S\ref{sec:method}).
+\item[R2] A universal U-shaped depth profile of spectral concentration --- did not
+reproduce across five architectures; model-specific.
+\item[R3] A non-trivial three-statistic spectral coupling --- reproduced by random
+spectra; algebraic identity.
+\item[R4] Tail-equivalence $\psi(\alpha,k)\to\tau_k^2$ and the closed form
+$\alpha^*=r-\tfrac12$ --- not predictive at operational $k$ (\S\ref{sec:certificate}).
+\item[R5] An absolute-$k_{\mathrm{eff}}$ retention threshold (``$K_{\text{crit}}$'') ---
+$k_{\mathrm{eff}}=19{,}666$ fails while $k_{\mathrm{eff}}=1{,}602$ holds; the boundary is
+an $N\times$density interaction.
+\item[R6] Retention failure mode as mis-selection --- inverted by the data; starvation
+is the only currently significant mechanism (pending inject, \S\ref{sec:retention}).
+\item[R7] Super-linear Python overhead as the memory-wall mechanism --- the mechanism is
+allocator fragmentation (\S\ref{sec:systems}).
+\item[R8] Pass-3 as the kernel bottleneck --- Pass-2 dominates ($74.4\%$ of M4,
+Table~\ref{tab:perpass}).
+\end{description}
+
+%==================================================================
+\section{Conclusion and future work}
+\label{sec:future}
+
+We assembled, around the single object of softmax concentration, an exact ranking
+identity (Theorem~1), a measured and descriptively-stated scaling law (Theorem~3) with
+two independent confirmations, a pre-registered retention characterisation with a clean
+leakage dissociation, a runtime-checkable per-query certificate, and a systems result in
+which a fused kernel is a structural prerequisite. Every claim was held to a
+matched-control discipline born from a falsified spectral hypothesis.
+
+\paragraph{Pre-registered next steps (not yet claimed).}
+\begin{itemize}[leftmargin=1.4em,itemsep=1pt]
+\item \textbf{Gap-1 --- causal upgrade of Theorem~3.} A matched-magnitude test:
+treatment $=$ logit-noise injection raising $H_N$ by $\Delta$ nats at minimal
+$\|\delta\|$; matched control $=$ a perturbation of equal $\|\delta\,\text{logits}\|_F$
+that preserves $H_N$; a random-spectrum baseline checking whether untrained $K$ yields
+the same $\alpha$. Pre-registered: a null demotes Theorem~3 to explicitly descriptive; a
+significant matched differential establishes the first causally validated scaling
+mechanism for sparse attention.
+\item \textbf{Retention gates.} Multi-seed the $128\text{K}$ boundary; settle
+starvation vs.\ mis-selection by oracle-inject; validate the needle-in-top-$k$ metric by
+anti-inject; decompose latency into TTFT (dense prefill, not accelerated) and per-token
+decode.
+\item \textbf{Cross-model $\alpha$.} Measure $\alpha$ across softmax-scaling regimes
+(vanilla+RoPE, SSMax, YaRN, $\alpha$-entmax) to convert ``model-specific'' from a caveat
+into a law.
+\item \textbf{Low-rank Q-axis (DCR-Loki).} Apply Theorem~1 in the top-$r$ PCA subspace
+of $K$; reducing $d=128\to r=8$ targets a $\sim16\times$ data-movement reduction on top
+of the $50\%$ compute saving, with a TV-distance error budget.
+\end{itemize}
+
+\appendix
+%==================================================================
+\section{Proof of Theorem~1}
+\label{app:proof-thm1}
+For any $Q\ne0$, $\langle Q,K\rangle=\|Q\|_2\,\langle \uQ,K\rangle$ with
+$\uQ=Q/\|Q\|_2$ and $\|Q\|_2>0$. Hence for any $i,j$, $\langle Q,K_i\rangle-\langle
+Q,K_j\rangle=\|Q\|_2(\langle\uQ,K_i\rangle-\langle\uQ,K_j\rangle)$, and the sign is
+preserved because $\|Q\|_2>0$. The softmax is strictly monotone in its logits, so the
+score ordering equals the projection ordering exactly. Ties of measure zero in exact
+arithmetic appear at finite rate ($\sim12\%$ $z$-ties) under \texttt{bf16} and are
+resolved by a stable tie-break (smaller index wins), which is the only source of the
+$\sim10^{-3}$ residual in the $45/45$ brute-force check (\S\ref{sec:scaling}).
+
+%==================================================================
+\section{Proof sketch of Theorem~3, and the kernel plan}
+\label{app:proof-thm3}
+\paragraph{Proof sketch.} The coverage floor admits
+$k_{\mathrm{eff}}=\lfloor c_{\mathrm{floor}}N\rfloor$ keys. Under
+Assumption~\ref{ass:entropy}, $\Keff(N)\sim N^{\alpha}$, so
+$k_{\mathrm{eff}}/\Keff\sim N^{1-\alpha}\to\infty$. By Theorem~1 the selected window is
+exactly the top-$k_{\mathrm{eff}}$ subset by attention score, so the captured
+probability mass $\to1$. By the head--tail decomposition,
+$\|\Attn-\Attn_{k_{\mathrm{eff}}}\|_2=\tau_N\|\mu_{\text{tail}}-\mu_{\text{head}}\|_2$
+with $\tau_N=\TV(P_N,\hat P_N)=O(N^{-(1-\alpha)})$; translating the output perturbation
+to perplexity via the cross-entropy expansion preserves the rate. The worst-head
+exponent $\alpha^*$ controls the rate; head-averaged $\alpha$ lower-bounds it.
+
+\paragraph{Kernel engineering plan (M0--M7).} A FlashDecoding-style kernel: KV in HBM;
+decode streams over KV in 64-key blocks, projecting onto $\uQ$ and maintaining a running
+top-$k$ via warp-shuffle merge; selected $K_{\text{sel}},V_{\text{sel}}$ pass through a
+fused online-softmax output kernel. The Pareto-optimal target tile regime is
+$k_{\mathrm{eff}}\in[0.3N,0.5N]$ (\S\ref{sec:scaling}). The ABKV variant replaces
+decode-time selection with a prefill prefix sort (\S\ref{sec:systems}); a Triton
+bitonic top-$k$ (M6) is retained as a fallback if the prefix mechanism fails to transfer
+from synthetic to real attention distributions.
+
+%==================================================================
+\section{Production artifact: sort library and explainable dispatch}
+\label{app:artifact}
+The framework ships as a C++17/AVX-2 sort library (validated to $21.6\times$ over
+\texttt{std::sort} on AVX-2, with bit-exact gradient verification
+$\|\nabla\|_2=\sqrt{n}$ to machine precision and $36/36$ correctness targets) and an
+AVX-512 build stress-tested at $\approx2{,}800$ correctness operations (one performance
+gate failure, no correctness failures), a $528$-case adversarial sweep with zero
+failures, byte-identical determinism over $50$ repeats, and linear scaling validated to
+$64$M elements. The runtime exposes an \emph{explainable} dispatch surface: the strategy,
+inversion density, NaN flag, and threads used per call are queryable, so adversarial
+tests can assert \emph{which} path ran, not merely that the output was correct ---
+``runtime decisions become falsifiable.'' This is the same observe-before-decide
+discipline as \S\ref{sec:method}, realised in software.
+
+%==================================================================
+\section{Matched-control raw and the Detector~v2 dispatcher}
+\label{app:detector}
+The matched-control run is the $300$-measurement design of \S\ref{sec:method}: twelve
+layer--head pairs, $25$ prompts, context $256$, three forward passes per measurement
+(unablated, dominant-mode treatment, matched bulk-mode control). Detector~v2 partitions
+queries by a coherence score $s_{v2}$ and an axis confidence $c$ into Dense /
+Rank-local / Hybrid regimes; the no-false-negative guarantee (Lemma~6.1 of the companion
+framework) is realised empirically as $15/15$ random queries routed to dense and zero
+false negatives over the $45$ calibration cells of \S\ref{sec:certificate}. The
+multi-axis extension predicts the axis count $r^\star=\lceil
+1.142\,d_{\mathrm{eff}}(Q)-1.048\rceil$ (Pearson $0.9925$ over $40$ trials, $32$--$86\%$
+relative error reduction over single-axis), promoting $d_{\mathrm{eff}}(Q)$ from a regime
+selector to a quantitative axis-count predictor and matching the structural negative
+result (Proposition~5.13: sparsity in the query spectrum does not imply rank-local
+recoverability under single-axis PCA; realised as a controlled $-17$\,pt BERT-MNLI drop).
+
+\begin{thebibliography}{99}
+\small
+\bibitem{seqev2025} Seqev. \emph{Q-Axis Rank-Local Sparse Attention} (Paper 1, mechanism). Preprint, 2025.
+\bibitem{quest} Tang et al. \emph{Quest: Query-Aware Sparsity}. ICML 2024.
+\bibitem{retattn} Liu et al. \emph{RetrievalAttention}. NeurIPS 2024.
+\bibitem{infllm} Xiao et al. \emph{InfLLM}. NeurIPS 2024.
+\bibitem{h2o} Zhang et al. \emph{H2O}. NeurIPS 2023.
+\bibitem{snapkv} Li et al. \emph{SnapKV}. NeurIPS 2024.
+\bibitem{loki} Kang et al. \emph{Loki: Low-rank Keys}. NeurIPS 2024.
+\bibitem{nsa} Yuan et al. \emph{Native Sparse Attention (NSA)}. 2025.
+\bibitem{dsa} DeepSeek-AI. \emph{DeepSeek-V3.2 / Dynamic Sparse Attention (DSA)}. 2025.
+\bibitem{tvtopk} TV-TopK Team. \emph{A Mathematical Theory of Top-$k$ Sparse Attention via Total Variation Distance}. arXiv:2512.07647, 2025.
+\bibitem{nativetopk} Native Top-$k$ Team. \emph{Promises and Challenges of Native Top-$k$ Sparse Attention}. arXiv:2512.03494, 2025.
+\bibitem{critscale} \emph{Critical Attention Scaling in Long-Context Transformers}. arXiv:2510.05554, 2025.
+\bibitem{mips} \emph{Maximum Inner Product is Query-Scaled Nearest Neighbor}. VLDB 2025.
+\bibitem{flashdecode} Dao. \emph{FlashDecoding}; Dao et al. \emph{FlashAttention}. 2022--2023.
+\bibitem{phitransport} Vyaltsev \& Vyaltsev. \emph{$\Phi$-Transport: A Unified Convex-Transport Framework}. Preprint v2.2, 2026.
+\bibitem{matched} Vyaltsev \& Vyaltsev. \emph{Matched-Magnitude Controls for Causal Testing of Spectral Mechanisms in Attention}. Note, 2026.
+\bibitem{gap} \emph{The Spectral Gap-Statement}. v1.1, DOI 10.5281/zenodo.20257482.
+\end{thebibliography}
+
+\end{document}

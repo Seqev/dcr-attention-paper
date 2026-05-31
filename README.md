@@ -1,3 +1,6 @@
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20479271.svg)](https://doi.org/10.5281/zenodo.20479271)
+
 # DCR-Attention — single-paper assembly (`paper-v1.0`)
 
 **Title.** *DCR-Attention: Exact Q-Axis Sparse Decode at Production Scale —

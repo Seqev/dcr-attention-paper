@@ -235,8 +235,47 @@ non-vacuous head-wise.
 We emphasise that Theorem~\ref{thm:scaling} is stated as a \emph{description}: the
 exponent $\alpha$ is measured per model, not derived from first principles, and the
 result is not claimed as a mechanism. \S\ref{sec:method} explains why this scoping is
-load-bearing, and \S\ref{sec:future} states the pre-registered causal test (Gap-1)
-that would upgrade or honestly close it.
+load-bearing, and \S\ref{sec:future} registers the matched-control causal test (Gap-1)
+that will upgrade or honestly close it.
+
+\paragraph{Causal status (pre-registered).} As of this release the premise of
+Theorem~\ref{thm:scaling} --- that entropy concentration is causally load-bearing for
+prediction --- has \emph{not} been subjected to a causal test; the claim is therefore
+descriptive. The matched-control protocol that will settle it is pre-registered in
+\S\ref{sec:future}, with both outcomes fixed in advance: a matched-magnitude null
+finalises Theorem~\ref{thm:scaling} as descriptive, while a significant matched
+differential upgrades it to causally grounded. We report the status this way so that
+the released record stakes the causal-test \emph{design}, not its result.
+
+%% ===================================================================
+%% POST-RUN INSERTION POINT (Gap-1). After the registered run returns,
+%% replace the paragraph above with EXACTLY ONE of the two branches below
+%% (uncomment it). Do not edit the numbers; paste the measured CI / p.
+%% -------------------------------------------------------------------
+%% BRANCH A --- DESCRIPTIVE (null: CI brackets 0 AND Wilcoxon p > 0.05)
+%% \paragraph{Causal status (matched-control null).} Under the pre-registered
+%% matched-magnitude test of \S\ref{sec:future}, the treatment-minus-control
+%% next-token NLL differential is $D_{\mathrm{NLL}}=\langle\text{VALUE}\rangle$
+%% (95\% bootstrap CI $\langle[\,\cdot,\cdot\,]\rangle$ bracketing zero, Wilcoxon
+%% $p=\langle\text{VALUE}\rangle$). By the pre-registered criterion this is a null:
+%% destroying entropy concentration harms prediction no more than a matched-magnitude
+%% perturbation that preserves it. Theorem~\ref{thm:scaling} is therefore
+%% \emph{descriptive} --- a measured scaling law, not a validated mechanism --- and we
+%% state it as such. (This matches the discipline of \S\ref{sec:method}, where the
+%% same matched-control framework closed a spectral-mechanism hypothesis.)
+%% -------------------------------------------------------------------
+%% BRANCH B --- CAUSAL-GROUNDED (significant: CI > 0 AND Wilcoxon p < 0.05)
+%% \paragraph{Causal validation.} Under the pre-registered matched-magnitude test of
+%% \S\ref{sec:future}, the treatment-minus-control next-token NLL differential is
+%% $D_{\mathrm{NLL}}=\langle\text{VALUE}\rangle$ (95\% bootstrap CI
+%% $\langle[\,\cdot,\cdot\,]\rangle>0$, Wilcoxon $p=\langle\text{VALUE}\rangle$), with a
+%% verified perturbation-magnitude ratio $1.000$ and matched-control $|\Delta H_C|\approx0$.
+%% Destroying entropy concentration degrades prediction significantly more than a
+%% matched-magnitude perturbation that preserves it: concentration is causally
+%% load-bearing. Theorem~\ref{thm:scaling}'s premise is thus causally grounded, not
+%% merely descriptive. (On abstract upgrade, change ``(Theorem~3, descriptive)'' to
+%% ``(Theorem~3, causally validated under matched control)''.)
+%% ===================================================================
 
 \subsection{A per-query certificate and the exact error geometry}
 \label{sec:certificate}
@@ -670,13 +709,9 @@ matched-control discipline born from a falsified spectral hypothesis.
 
 \paragraph{Pre-registered next steps (not yet claimed).}
 \begin{itemize}[leftmargin=1.4em,itemsep=1pt]
-\item \textbf{Gap-1 --- causal upgrade of Theorem~3.} A matched-magnitude test:
-treatment $=$ logit-noise injection raising $H_N$ by $\Delta$ nats at minimal
-$\|\delta\|$; matched control $=$ a perturbation of equal $\|\delta\,\text{logits}\|_F$
-that preserves $H_N$; a random-spectrum baseline checking whether untrained $K$ yields
-the same $\alpha$. Pre-registered: a null demotes Theorem~3 to explicitly descriptive; a
-significant matched differential establishes the first causally validated scaling
-mechanism for sparse attention.
+\item \textbf{Gap-1 --- causal upgrade of Theorem~3.} A matched-magnitude causal test of
+the entropy-concentration premise; the protocol and both pre-registered outcomes are
+specified below.
 \item \textbf{Retention gates.} Multi-seed the $128\text{K}$ boundary; settle
 starvation vs.\ mis-selection by oracle-inject; validate the needle-in-top-$k$ metric by
 anti-inject; decompose latency into TTFT (dense prefill, not accelerated) and per-token
@@ -688,6 +723,41 @@ into a law.
 of $K$; reducing $d=128\to r=8$ targets a $\sim16\times$ data-movement reduction on top
 of the $50\%$ compute saving, with a TV-distance error budget.
 \end{itemize}
+
+\paragraph{Registered protocol (Gap-1), recorded as of this release.} We register the
+causal test of Theorem~\ref{thm:scaling} before running it, so that this release stakes
+the test design. Object: the premise that entropy concentration is causally
+load-bearing. For per-query logits $\boldsymbol{\ell}=QK^\top/\sqrt d$,
+$p=\mathrm{softmax}(\boldsymbol{\ell})$, $H(p)=-\sum_i p_i\log p_i$, with entropy
+gradient $g=\nabla_{\boldsymbol{\ell}}H=-p\odot(\log p+H)$:
+\begin{itemize}[leftmargin=1.4em,itemsep=1pt]
+\item \textbf{Treatment} $\delta_T$: a step along $+g/\|g\|$ sized so the realised
+$\Delta H\approx\Delta_{\text{target}}$ nats (destroying concentration toward uniform).
+\item \textbf{Matched control} $\delta_C$: a random direction projected onto
+$\{v:\langle v,\hat g\rangle=0\}$ and scaled to $\|\delta_C\|=\|\delta_T\|$, so $H$ is
+preserved to first order. The matched invariant is the \emph{perturbation norm}
+$\|\delta\boldsymbol{\ell}\|$ --- not $\|\boldsymbol{\ell}\|$ --- which is precisely the
+invariant the spectral-mechanism study of \S\ref{sec:method} got wrong before
+correction.
+\item \textbf{Contract gates} (else a cell is invalid): verified ratio
+$\|\delta_T\|/\|\delta_C\|=1.000\pm10^{-3}$ and measured $|\Delta H_C|\le0.1\,
+\Delta_{\text{target}}$.
+\item \textbf{Random-$K$ baseline}: whether untrained $K$ yields the same $\alpha$,
+contextualising algebraic vs.\ trained origin.
+\item \textbf{Primary metric}: paired next-token NLL differential
+$D_{\mathrm{NLL}}=\mathrm{NLL}_{\text{treat}}-\mathrm{NLL}_{\text{ctrl}}$; statistics by
+$10$k-resample bootstrap $95\%$ CI and Wilcoxon signed-rank, mirroring
+Table~\ref{tab:matched}; design $12$ layer--head pairs $\times\,25$ prompts, multi-seed
+before any final claim.
+\end{itemize}
+\textbf{Pre-registered outcomes (fixed now).} If the $95\%$ CI of $D_{\mathrm{NLL}}$
+brackets zero \emph{and} Wilcoxon $p>0.05$: Theorem~\ref{thm:scaling} is finalised as
+\emph{descriptive} under a matched-control null. If the CI is strictly positive
+\emph{and} $p<0.05$: the concentration premise is \emph{causally grounded}. No
+reinterpretation of a null as a weak positive is permitted; the decision is read off the
+CI and Wilcoxon test. The result will be published as version~\texttt{v1.1} (versioned
+DOI; concept DOI unchanged), by uncommenting the corresponding branch already prepared in
+\S\ref{sec:theory}.
 
 \appendix
 %==================================================================

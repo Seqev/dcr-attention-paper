@@ -1,0 +1,13 @@
+{
+  "title": "DCR-Attention: Exact Q-Axis Sparse Decode at Production Scale",
+  "description": "Training-free Q-axis sparse attention for long-context LLM decode: exact ranking (Theorem 1), a measured scaling law dPPL=O(N^-(1-alpha)) with alpha~0.31, retention of long-range dependence to 128K, and a per-query certificate, validated under matched-control discipline. Llama-3.2-1B, WikiText-2.",
+  "upload_type": "publication",
+  "publication_type": "preprint",
+  "version": "v1.0",
+  "license": "CC-BY-4.0",
+  "keywords": ["sparse attention", "long-context", "LLM inference", "KV cache", "transformers", "matched-control"],
+  "creators": [
+    {"name": "Vyaltsev, Evgeny", "orcid": "0009-0004-3712-6798"},
+    {"name": "Vyaltsev, Daniil"}
+  ]
+}

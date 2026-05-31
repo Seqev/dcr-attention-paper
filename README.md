@@ -43,9 +43,12 @@ cd paper && pdflatex main.tex && pdflatex main.tex && pdflatex main.tex
 ## How to cite
 ```
 @misc{dcr_attention_2026,
-  author = {Vyaltsev, Evgeny and Vyaltsev, Daniil},
-  title  = {DCR-Attention: Exact Q-Axis Sparse Decode at Production Scale},
-  year   = {2026}, note = {Zenodo, paper-v1.0}, doi = {<MINTED-ON-RELEASE>}
+  author    = {Vyaltsev, Evgeny and Vyaltsev, Daniil},
+  title     = {{DCR-Attention: Exact Q-Axis Sparse Decode at Production Scale}},
+  year      = {2026},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.20479271},
+  url       = {https://doi.org/10.5281/zenodo.20479271}
 }
 ```
 
